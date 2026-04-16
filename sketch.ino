@@ -26,28 +26,39 @@ char pass[] = "";
 #define HX711_DT_PIN   16
 #define HX711_SCK_PIN  17
 
+// ===== Notification Settings =====
+#define LOW_WEIGHT_THRESHOLD 1.0  // 1 kg threshold
+#define NOTIFICATION_COOLDOWN 60000  // 1 minute cooldown
+
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 HX711 scale;
 
-// RFID Tags Mapping
+// RFID Tags Mapping with RFID numbers instead of names
 struct RFIDTag {
   String uid;
   int vPin;
+  String rfidNumber;
+  String eventName;
+  unsigned long lastNotificationTime;
 };
 
 RFIDTag tags[] = {
-  {"01:02:03:04", V10},
-  {"AA:BB:CC:DD", V11},
-  {"11:22:33:44", V12},
-  {"55:66:77:88", V13},
-  {"99:00:11:22", V14}
+  {"01:02:03:04", V10, "RFID 1", "low_weight_rfid1", 0},
+  {"AA:BB:CC:DD", V11, "RFID 2", "low_weight_rfid2", 0},
+  {"11:22:33:44", V12, "RFID 3", "low_weight_rfid3", 0},
+  {"55:66:77:88", V13, "RFID 4", "low_weight_rfid4", 0},
+  {"99:00:11:22", V14, "RFID 5", "low_weight_rfid5", 0}
 };
 int tagCount = 5;
 
 String currentUID = "";
 int currentVPin = -1;
+String currentRfidNumber = "";
+String currentEventName = "";
 unsigned long lastMeasurementTime = 0;
 const unsigned long MEASUREMENT_INTERVAL = 10000;
+
+bool lowWeightNotified[5] = {false, false, false, false, false};
 
 BlynkTimer timer;
 
@@ -58,15 +69,24 @@ void setup() {
   mfrc522.PCD_Init();
   
   scale.begin(HX711_DT_PIN, HX711_SCK_PIN);
-  scale.set_scale(420);  // Your working calibration factor
+  scale.set_scale(420);
   scale.tare();
   
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   timer.setInterval(MEASUREMENT_INTERVAL, sendWeightToBlynk);
   
   Serial.println("\n✅ RFID + Weight System Ready");
-  Serial.println("Unit: Kilograms (1 decimal place precision)");
-  Serial.println("Tap a registered RFID tag to start monitoring\n");
+  Serial.println("Low weight notifications with separate events per RFID");
+  Serial.println("Registered Tags:");
+  for (int i = 0; i < tagCount; i++) {
+    Serial.print("  ");
+    Serial.print(tags[i].rfidNumber);
+    Serial.print(" -> ");
+    Serial.print(tags[i].uid);
+    Serial.print(" -> Event: ");
+    Serial.println(tags[i].eventName);
+  }
+  Serial.println();
 }
 
 void loop() {
@@ -83,6 +103,33 @@ int findVPinByUID(String uid) {
     }
   }
   return -1;
+}
+
+int findTagIndexByUID(String uid) {
+  for (int i = 0; i < tagCount; i++) {
+    if (tags[i].uid == uid) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+String findRfidNumberByUID(String uid) {
+  for (int i = 0; i < tagCount; i++) {
+    if (tags[i].uid == uid) {
+      return tags[i].rfidNumber;
+    }
+  }
+  return "Unknown RFID";
+}
+
+String findEventNameByUID(String uid) {
+  for (int i = 0; i < tagCount; i++) {
+    if (tags[i].uid == uid) {
+      return tags[i].eventName;
+    }
+  }
+  return "";
 }
 
 void checkForNewRFID() {
@@ -103,11 +150,21 @@ void checkForNewRFID() {
     if (currentUID != newUID) {
       currentUID = newUID;
       currentVPin = newVPin;
+      currentRfidNumber = findRfidNumberByUID(newUID);
+      currentEventName = findEventNameByUID(newUID);
       
       Serial.print("🎫 Switched to Tag: ");
+      Serial.print(currentRfidNumber);
+      Serial.print(" (");
       Serial.print(currentUID);
-      Serial.print(" | Using Virtual Pin: V");
-      Serial.println(currentVPin - 10);
+      Serial.print(") | Event: ");
+      Serial.println(currentEventName);
+      
+      // Reset notification flag when switching to a new tag
+      int newTagIndex = findTagIndexByUID(newUID);
+      if (newTagIndex != -1) {
+        lowWeightNotified[newTagIndex] = false;
+      }
       
       sendWeightToBlynk();
     }
@@ -116,10 +173,46 @@ void checkForNewRFID() {
       Serial.println("⚠️ Unregistered tag tapped. Monitoring stopped.");
       currentUID = "";
       currentVPin = -1;
+      currentRfidNumber = "";
+      currentEventName = "";
     }
   }
   
   mfrc522.PICC_HaltA();
+}
+
+void sendLowWeightNotification(int tagIndex, float weight) {
+  unsigned long currentTime = millis();
+  
+  // FIX: Only check cooldown if a notification has been sent before (lastNotificationTime != 0)
+  if (tags[tagIndex].lastNotificationTime != 0) {
+    unsigned long timeSinceLastNotification = currentTime - tags[tagIndex].lastNotificationTime;
+    if (timeSinceLastNotification < NOTIFICATION_COOLDOWN) {
+      Serial.print("  ⏸️ Cooldown active for ");
+      Serial.print(tags[tagIndex].rfidNumber);
+      Serial.print(" - ");
+      Serial.print((NOTIFICATION_COOLDOWN - timeSinceLastNotification) / 1000);
+      Serial.println(" seconds remaining");
+      return;
+    }
+  }
+  
+  // Send SEPARATE event for this specific RFID tag
+  String notificationMsg = "⚠️ LOW WEIGHT! " + tags[tagIndex].rfidNumber + " is at " + String(weight, 1) + " kg";
+  
+  // Use the specific event name for this RFID
+  Blynk.logEvent(tags[tagIndex].eventName, notificationMsg);
+  
+  // Also send to a virtual pin for dashboard display
+  Blynk.virtualWrite(V6, notificationMsg);
+  
+  // Update last notification time
+  tags[tagIndex].lastNotificationTime = currentTime;
+  
+  Serial.print("🔔 NOTIFICATION SENT [");
+  Serial.print(tags[tagIndex].eventName);
+  Serial.print("]: ");
+  Serial.println(notificationMsg);
 }
 
 void sendWeightToBlynk() {
@@ -128,18 +221,40 @@ void sendWeightToBlynk() {
   float weight_kg = scale.get_units(5);
   if (weight_kg < 0) weight_kg = 0;
   
-  // Send to dedicated Virtual Pin for this RFID tag
-  Blynk.virtualWrite(currentVPin, weight_kg);
+  int tagIndex = findTagIndexByUID(currentUID);
   
-  // Update global weight display
+  // Send to dedicated Virtual Pin
+  Blynk.virtualWrite(currentVPin, weight_kg);
   Blynk.virtualWrite(V0, weight_kg);
   
-  // Display locally in KG with 1 decimal
-  Serial.print("📤 Sent to Blynk - Tag: ");
-  Serial.print(currentUID);
-  Serial.print(" | Weight: ");
-  Serial.print(weight_kg, 1);  // 1 decimal place
+  // Display locally
+  Serial.print("📤 ");
+  Serial.print(currentRfidNumber);
+  Serial.print(": ");
+  Serial.print(weight_kg, 1);
   Serial.println(" kg");
+  
+  // Check low weight condition
+  if (weight_kg < LOW_WEIGHT_THRESHOLD && weight_kg > 0) {
+    if (!lowWeightNotified[tagIndex]) {
+      // First time below threshold - send notification
+      sendLowWeightNotification(tagIndex, weight_kg);
+      lowWeightNotified[tagIndex] = true;
+    } else {
+      // Already notified - check cooldown for subsequent notifications
+      sendLowWeightNotification(tagIndex, weight_kg);
+    }
+  } else {
+    if (lowWeightNotified[tagIndex]) {
+      lowWeightNotified[tagIndex] = false;
+      // Reset lastNotificationTime when weight is restored
+      tags[tagIndex].lastNotificationTime = 0;
+      String recoveryMsg = "✅ " + currentRfidNumber + " restored to " + String(weight_kg, 1) + " kg";
+      Blynk.virtualWrite(V6, recoveryMsg);
+      Serial.print("📢 Recovery: ");
+      Serial.println(recoveryMsg);
+    }
+  }
 }
 
 // Tare command from Blynk app (V5 button)
@@ -148,6 +263,6 @@ BLYNK_WRITE(V5) {
   if (value == 1) {
     Serial.println("⚖️ Tare command received from Blynk");
     scale.tare();
-    sendWeightToBlynk();  // Send updated reading
+    sendWeightToBlynk();
   }
 }
