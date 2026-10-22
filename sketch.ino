@@ -1,7 +1,7 @@
 // ===== BLYNK CONFIGURATION =====
 #define BLYNK_TEMPLATE_ID "TMPL3SAdiyxEx"
 #define BLYNK_TEMPLATE_NAME "Smart Grocery Tracker"
-#define BLYNK_AUTH_TOKEN "_dEgf13EN33hW5B8P7XfpzQBrq3EHZ2a"
+#define BLYNK_AUTH_TOKEN "REPLACE_WITH_YOUR_BLYNK_AUTH_TOKEN"
 
 // ===== INCLUDES =====
 #include <WiFi.h>
